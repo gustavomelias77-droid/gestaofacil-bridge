@@ -25,18 +25,21 @@ def login():
             context = browser.new_context(ignore_https_errors=True)
             page = context.new_page()
 
-            # Acessa página de login
             page.goto(f'{BASE}/gestaofacil/login/Index', wait_until='networkidle', timeout=30000)
             logger.info(f'URL: {page.url}')
 
-            # Preenche os campos diretamente via JS
-            page.evaluate('document.querySelector(\'input[name="username"]\').value = arguments[0]', USERNAME)
-            page.evaluate('document.querySelector(\'input[name="password"]\').value = arguments[0]', SENHA)
+            page.evaluate('''(user) => {
+                const el = document.querySelector('input[name="username"]');
+                if (el) el.value = user;
+            }''', USERNAME)
 
-            # Submete o formulário via JS
-            page.evaluate('document.querySelector("form").submit()')
+            page.evaluate('''(pass) => {
+                const el = document.querySelector('input[name="password"]');
+                if (el) el.value = pass;
+            }''', SENHA)
 
-            # Aguarda navegação
+            page.evaluate('() => { document.querySelector("form").submit(); }')
+
             try:
                 page.wait_for_load_state('networkidle', timeout=20000)
             except:
@@ -44,25 +47,10 @@ def login():
 
             logger.info(f'URL pós-login: {page.url}')
 
-            # Verifica se login funcionou
             if 'login' not in page.url.lower():
                 context.storage_state(path=STORAGE_FILE)
                 browser.close()
-                logger.info('Login OK')
-                return jsonify({'success': True, 'url': page.url})
-
-            # Se falhou, tenta com Enter key
-            page.goto(f'{BASE}/gestaofacil/login/Index', wait_until='networkidle', timeout=30000)
-            page.evaluate('document.querySelector(\'input[name="username"]\').value = arguments[0]', USERNAME)
-            page.evaluate('document.querySelector(\'input[name="password"]\').value = arguments[0]', SENHA)
-            page.keyboard.press('Enter')
-            page.wait_for_timeout(5000)
-
-            if 'login' not in page.url.lower():
-                context.storage_state(path=STORAGE_FILE)
-                browser.close()
-                logger.info('Login OK (2a tentativa)')
-                return jsonify({'success': True, 'url': page.url})
+                return jsonify({'success': True})
 
             browser.close()
             return jsonify({'error': 'Login falhou', 'url_final': page.url}), 502
