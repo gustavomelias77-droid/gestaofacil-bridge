@@ -1,4 +1,4 @@
-import os, logging
+import os, logging, base64
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
 
@@ -25,30 +25,85 @@ def login():
             context = browser.new_context()
             page = context.new_page()
 
-            # Acessa página de login
             page.goto('https://logus.gfsis.com.br/gestaofacil/login/Index', wait_until='networkidle')
-            logger.info(f'URL após GET: {page.url}')
+            logger.info(f'URL: {page.url}')
+            logger.info(f'Título: {page.title()}')
 
-            # Salva screenshot pra debug
-            page.screenshot(path='login_page.png')
+            # Captura o HTML para debug
+            html = page.content()
 
-            # Preenche campos
-            page.fill('input[name="username"]', USERNAME)
-            page.fill('input[name="password"]', SENHA)
+            # Tenta descobrir os names dos campos olhando o HTML
+            input_names = page.evaluate('''() => {
+                const inputs = document.querySelectorAll('input[type="text"], input[type="password"], input:not([type="hidden"])');
+                return Array.from(inputs).map(i => ({name: i.name, id: i.id, type: i.type, placeholder: i.placeholder}));
+            }''')
+            logger.info(f'Inputs encontrados: {input_names}')
 
-            # Tenta clique no botão de submit
-            try:
-                page.click('input[type="submit"]', timeout=5000)
-            except:
+            # Tenta preencher por vários nomes possíveis
+            tentativas_user = ['username', 'login', 'usuario', 'user', 'email', 'cpf']
+            tentativas_senha = ['password', 'senha', 'pass', 'pwd']
+
+            campo_user = None
+            campo_senha = None
+
+            for nome in tentativas_user:
                 try:
-                    page.click('button[type="submit"]', timeout=5000)
+                    page.fill(f'input[name="{nome}"]', USERNAME, timeout=2000)
+                    campo_user = nome
+                    logger.info(f'Campo user encontrado: {nome}')
+                    break
                 except:
-                    page.click('button:has-text("Entrar"), input[value="Entrar"]', timeout=5000)
+                    continue
+
+            if not campo_user:
+                # Tenta por placeholder
+                for nome in tentativas_user:
+                    try:
+                        page.fill(f'input[placeholder*="{nome}" i]', USERNAME, timeout=2000)
+                        campo_user = nome
+                        logger.info(f'Campo user por placeholder: {nome}')
+                        break
+                    except:
+                        continue
+
+            for nome in tentativas_senha:
+                try:
+                    page.fill(f'input[name="{nome}"]', SENHA, timeout=2000)
+                    campo_senha = nome
+                    logger.info(f'Campo senha encontrado: {nome}')
+                    break
+                except:
+                    continue
+
+            if not campo_user or not campo_senha:
+                browser.close()
+                return jsonify({
+                    'error': 'Não encontrou campos de login',
+                    'inputs_encontrados': input_names,
+                    'html_preview': html[:2000]
+                }), 502
+
+            # Tenta submit por vários métodos
+            submit_feito = False
+            for seletor in ['input[type="submit"]', 'button[type="submit"]', 'button:has-text("Entrar")', 'button:has-text("OK")', 'input[value="Entrar"]', 'input[value="OK"]', 'form']:
+                try:
+                    if seletor == 'form':
+                        page.evaluate('document.querySelector("form").submit()')
+                    else:
+                        page.click(seletor, timeout=3000)
+                    submit_feito = True
+                    logger.info(f'Submit com seletor: {seletor}')
+                    break
+                except:
+                    continue
+
+            if not submit_feito:
+                browser.close()
+                return jsonify({'error': 'Não encontrou botão de submit', 'inputs': input_names}), 502
 
             page.wait_for_load_state('networkidle', timeout=15000)
-            logger.info(f'URL após submit: {page.url}')
+            logger.info(f'URL pós-login: {page.url}')
 
-            # Verifica se login funcionou
             if 'login' not in page.url.lower():
                 context.storage_state(path=STORAGE_FILE)
                 browser.close()
@@ -56,10 +111,14 @@ def login():
                 return jsonify({'success': True})
 
             browser.close()
-            return jsonify({'error': 'Login falhou - ainda na página de login'}), 502
+            return jsonify({
+                'error': 'Login falhou',
+                'url_final': page.url,
+                'inputs_encontrados': input_names
+            }), 502
 
     except Exception as e:
-        logger.error(f'Erro no login: {e}')
+        logger.error(f'Erro: {e}')
         return jsonify({'error': str(e)}), 502
 
 @app.route('/fetch', methods=['POST'])
