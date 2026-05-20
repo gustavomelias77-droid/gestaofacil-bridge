@@ -1,4 +1,4 @@
-import os, logging, base64
+import os, logging
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
 
@@ -14,96 +14,103 @@ STORAGE_FILE = 'state.json'
 
 @app.route('/health')
 def health():
-    auth = os.path.exists(STORAGE_FILE)
-    return jsonify({'status': 'ok', 'authenticated': auth})
+    return jsonify({'status': 'ok', 'authenticated': os.path.exists(STORAGE_FILE)})
 
 @app.route('/login', methods=['POST'])
 def login():
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
+            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-gpu'])
             context = browser.new_context()
             page = context.new_page()
 
-            page.goto('https://logus.gfsis.com.br/gestaofacil/login/Index', wait_until='networkidle')
-            logger.info(f'URL: {page.url}')
-            logger.info(f'Título: {page.title()}')
+            # Passo 1: pegar HTML e JSESSIONID da página de login
+            resp = page.goto('https://logus.gfsis.com.br/gestaofacil/login/Index', wait_until='networkidle')
+            logger.info(f'URL inicial: {page.url}')
 
-            # Captura o HTML para debug
-            html = page.content()
-
-            # Tenta descobrir os names dos campos olhando o HTML
-            input_names = page.evaluate('''() => {
-                const inputs = document.querySelectorAll('input[type="text"], input[type="password"], input:not([type="hidden"])');
-                return Array.from(inputs).map(i => ({name: i.name, id: i.id, type: i.type, placeholder: i.placeholder}));
+            # Passo 2: descobrir estrutura do formulário via JS
+            form_info = page.evaluate('''() => {
+                const form = document.querySelector('form');
+                if (!form) return {form: false, inputs: []};
+                const inputs = Array.from(form.querySelectorAll('input')).map(i => ({
+                    name: i.name, id: i.id, type: i.type, value: i.value
+                }));
+                const buttons = Array.from(document.querySelectorAll('input[type="submit"], button[type="submit"], button')).map(b => ({
+                    tag: b.tagName, type: b.type, text: b.innerText?.trim() || b.value || '', id: b.id
+                }));
+                return {
+                    form: true,
+                    formAction: form.action,
+                    formMethod: form.method,
+                    inputs: inputs,
+                    buttons: buttons
+                };
             }''')
-            logger.info(f'Inputs encontrados: {input_names}')
+            logger.info(f'Formulário: {form_info}')
 
-            # Tenta preencher por vários nomes possíveis
-            tentativas_user = ['username', 'login', 'usuario', 'user', 'email', 'cpf']
-            tentativas_senha = ['password', 'senha', 'pass', 'pwd']
-
-            campo_user = None
-            campo_senha = None
-
-            for nome in tentativas_user:
-                try:
-                    page.fill(f'input[name="{nome}"]', USERNAME, timeout=2000)
-                    campo_user = nome
-                    logger.info(f'Campo user encontrado: {nome}')
-                    break
-                except:
-                    continue
-
-            if not campo_user:
-                # Tenta por placeholder
-                for nome in tentativas_user:
+            # Passo 3: preencher campos (tenta name, id, placeholder)
+            campos = {'username': USERNAME, 'password': SENHA}
+            for nome_campo, valor in campos.items():
+                preenchido = False
+                for seletor_base in [f'[name="{nome_campo}"]', f'#{nome_campo}', f'[placeholder*="{nome_campo}" i]',
+                                     f'[name="j_{nome_campo}"]', f'[name*="{nome_campo}"]']:
                     try:
-                        page.fill(f'input[placeholder*="{nome}" i]', USERNAME, timeout=2000)
-                        campo_user = nome
-                        logger.info(f'Campo user por placeholder: {nome}')
-                        break
+                        el = page.query_selector(seletor_base)
+                        if el:
+                            el.fill(valor)
+                            logger.info(f'Preencheu {seletor_base} com {nome_campo}')
+                            preenchido = True
+                            break
                     except:
                         continue
+                if not preenchido:
+                    # Tenta achar qualquer input de texto/password
+                    try:
+                        inputs = page.query_selector_all('input:not([type="hidden"])')
+                        for inp in inputs:
+                            tipo = inp.get_attribute('type')
+                            if tipo == 'password' and nome_campo == 'password':
+                                inp.fill(valor)
+                                preenchido = True
+                                break
+                            elif tipo in ('text', None, '') and nome_campo == 'username':
+                                inp.fill(valor)
+                                preenchido = True
+                                break
+                    except:
+                        pass
 
-            for nome in tentativas_senha:
+            # Passo 4: submit
+            submit_ok = False
+            # Tenta 1: clicar no botão submit
+            for sel in ['input[type="submit"]', 'button[type="submit"]', 'button:has-text("Entrar")']:
                 try:
-                    page.fill(f'input[name="{nome}"]', SENHA, timeout=2000)
-                    campo_senha = nome
-                    logger.info(f'Campo senha encontrado: {nome}')
+                    page.click(sel, timeout=3000)
+                    submit_ok = True
                     break
                 except:
                     continue
 
-            if not campo_user or not campo_senha:
-                browser.close()
-                return jsonify({
-                    'error': 'Não encontrou campos de login',
-                    'inputs_encontrados': input_names,
-                    'html_preview': html[:2000]
-                }), 502
-
-            # Tenta submit por vários métodos
-            submit_feito = False
-            for seletor in ['input[type="submit"]', 'button[type="submit"]', 'button:has-text("Entrar")', 'button:has-text("OK")', 'input[value="Entrar"]', 'input[value="OK"]', 'form']:
+            # Tenta 2: Enter no último campo
+            if not submit_ok:
                 try:
-                    if seletor == 'form':
-                        page.evaluate('document.querySelector("form").submit()')
-                    else:
-                        page.click(seletor, timeout=3000)
-                    submit_feito = True
-                    logger.info(f'Submit com seletor: {seletor}')
-                    break
+                    page.keyboard.press('Enter')
+                    submit_ok = True
                 except:
-                    continue
+                    pass
 
-            if not submit_feito:
-                browser.close()
-                return jsonify({'error': 'Não encontrou botão de submit', 'inputs': input_names}), 502
+            # Tenta 3: submit via JavaScript
+            if not submit_ok:
+                try:
+                    page.evaluate('document.querySelector("form")?.submit()')
+                    submit_ok = True
+                except:
+                    pass
 
             page.wait_for_load_state('networkidle', timeout=15000)
             logger.info(f'URL pós-login: {page.url}')
 
+            # Verifica sucesso
             if 'login' not in page.url.lower():
                 context.storage_state(path=STORAGE_FILE)
                 browser.close()
@@ -114,7 +121,7 @@ def login():
             return jsonify({
                 'error': 'Login falhou',
                 'url_final': page.url,
-                'inputs_encontrados': input_names
+                'form_info': form_info
             }), 502
 
     except Exception as e:
