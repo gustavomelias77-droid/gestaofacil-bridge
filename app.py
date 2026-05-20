@@ -24,61 +24,42 @@ def login():
             browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
             context = browser.new_context()
             page = context.new_page()
-            
-            # Passo 1: acessa página de login
+
+            # Acessa página de login
             page.goto('https://logus.gfsis.com.br/gestaofacil/login/Index', wait_until='networkidle')
-            
-            # Passo 2: preenche campos (tenta múltiplos nomes possíveis)
+            logger.info(f'URL após GET: {page.url}')
+
+            # Salva screenshot pra debug
+            page.screenshot(path='login_page.png')
+
+            # Preenche campos
             page.fill('input[name="username"]', USERNAME)
             page.fill('input[name="password"]', SENHA)
-            
-            # Passo 3: tenta múltiplos seletores de submit
+
+            # Tenta clique no botão de submit
             try:
                 page.click('input[type="submit"]', timeout=5000)
             except:
                 try:
                     page.click('button[type="submit"]', timeout=5000)
                 except:
-                    page.click('button:has-text("Entrar"), input[value="Entrar"], button:has-text("OK")', timeout=5000)
-            
+                    page.click('button:has-text("Entrar"), input[value="Entrar"]', timeout=5000)
+
             page.wait_for_load_state('networkidle', timeout=15000)
-            
-            # Passo 4: verifica se saiu da página de login
+            logger.info(f'URL após submit: {page.url}')
+
+            # Verifica se login funcionou
             if 'login' not in page.url.lower():
                 context.storage_state(path=STORAGE_FILE)
                 browser.close()
                 logger.info('Login OK')
                 return jsonify({'success': True})
-            
-            # Fallback: tenta POST direto via JavaScript
-            logger.info('Tentando fallback via POST direto')
-            result = page.evaluate('''
-                async () => {
-                    const resp = await fetch("/gestaofacil/login/neo_security_manager", {
-                        method: "POST",
-                        headers: {"Content-Type": "application/x-www-form-urlencoded"},
-                        body: new URLSearchParams({
-                            username: arguments[0],
-                            password: arguments[1]
-                        })
-                    });
-                    return resp.url;
-                }
-            ''', USERNAME, SENHA)
-            
-            page.goto('https://logus.gfsis.com.br/gestaofacil/', wait_until='networkidle')
-            
-            if 'login' not in page.url.lower():
-                context.storage_state(path=STORAGE_FILE)
-                browser.close()
-                logger.info('Login OK via fallback')
-                return jsonify({'success': True})
-            
+
             browser.close()
-            return jsonify({'error': 'Login falhou em todas as tentativas'}), 502
-            
+            return jsonify({'error': 'Login falhou - ainda na página de login'}), 502
+
     except Exception as e:
-        logger.error(f'Erro: {e}')
+        logger.error(f'Erro no login: {e}')
         return jsonify({'error': str(e)}), 502
 
 @app.route('/fetch', methods=['POST'])
