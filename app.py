@@ -11,6 +11,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 STORAGE_FILE = 'state.json'
+BASE_URL = 'https://logus.gfsis.com.br'
 
 @app.route('/health')
 def health():
@@ -24,104 +25,93 @@ def login():
             context = browser.new_context()
             page = context.new_page()
 
-            # Passo 1: pegar HTML e JSESSIONID da página de login
-            resp = page.goto('https://logus.gfsis.com.br/gestaofacil/login/Index', wait_until='networkidle')
+            # Passo 1: acessar página de login (captura JSESSIONID automaticamente)
+            resp = page.goto(f'{BASE_URL}/gestaofacil/login/Index', wait_until='networkidle')
             logger.info(f'URL inicial: {page.url}')
+            logger.info(f'Status: {resp.status if resp else "N/A"}')
 
-            # Passo 2: descobrir estrutura do formulário via JS
-            form_info = page.evaluate('''() => {
+            # Passo 2: preencher formulário via JavaScript para garantir que funciona
+            page.evaluate('''({ user, pass }) => {
                 const form = document.querySelector('form');
-                if (!form) return {form: false, inputs: []};
-                const inputs = Array.from(form.querySelectorAll('input')).map(i => ({
-                    name: i.name, id: i.id, type: i.type, value: i.value
-                }));
-                const buttons = Array.from(document.querySelectorAll('input[type="submit"], button[type="submit"], button')).map(b => ({
-                    tag: b.tagName, type: b.type, text: b.innerText?.trim() || b.value || '', id: b.id
-                }));
-                return {
-                    form: true,
-                    formAction: form.action,
-                    formMethod: form.method,
-                    inputs: inputs,
-                    buttons: buttons
-                };
+                if (!form) return 'form nao encontrado';
+                const u = form.querySelector('input[name="username"]');
+                const p = form.querySelector('input[name="password"]');
+                if (!u || !p) return 'campos nao encontrados';
+                u.value = user;
+                p.value = pass;
+                return 'preenchido';
+            }''', {'user': USERNAME, 'pass': SENHA})
+
+            logger.info('Campos preenchidos via JS')
+
+            # Passo 3: submit do form via JavaScript
+            resultado = page.evaluate('''() => {
+                const form = document.querySelector('form');
+                if (!form) return 'form ausente';
+                // Tenta o botão submit primeiro
+                const btn = form.querySelector('input[type="submit"], button[type="submit"]');
+                if (btn) {
+                    btn.click();
+                    return 'click submit';
+                }
+                // Fallback: submit direto
+                form.submit();
+                return 'form submit';
             }''')
-            logger.info(f'Formulário: {form_info}')
+            logger.info(f'Submit: {resultado}')
 
-            # Passo 3: preencher campos (tenta name, id, placeholder)
-            campos = {'username': USERNAME, 'password': SENHA}
-            for nome_campo, valor in campos.items():
-                preenchido = False
-                for seletor_base in [f'[name="{nome_campo}"]', f'#{nome_campo}', f'[placeholder*="{nome_campo}" i]',
-                                     f'[name="j_{nome_campo}"]', f'[name*="{nome_campo}"]']:
-                    try:
-                        el = page.query_selector(seletor_base)
-                        if el:
-                            el.fill(valor)
-                            logger.info(f'Preencheu {seletor_base} com {nome_campo}')
-                            preenchido = True
-                            break
-                    except:
-                        continue
-                if not preenchido:
-                    # Tenta achar qualquer input de texto/password
-                    try:
-                        inputs = page.query_selector_all('input:not([type="hidden"])')
-                        for inp in inputs:
-                            tipo = inp.get_attribute('type')
-                            if tipo == 'password' and nome_campo == 'password':
-                                inp.fill(valor)
-                                preenchido = True
-                                break
-                            elif tipo in ('text', None, '') and nome_campo == 'username':
-                                inp.fill(valor)
-                                preenchido = True
-                                break
-                    except:
-                        pass
-
-            # Passo 4: submit
-            submit_ok = False
-            # Tenta 1: clicar no botão submit
-            for sel in ['input[type="submit"]', 'button[type="submit"]', 'button:has-text("Entrar")']:
-                try:
-                    page.click(sel, timeout=3000)
-                    submit_ok = True
-                    break
-                except:
-                    continue
-
-            # Tenta 2: Enter no último campo
-            if not submit_ok:
-                try:
-                    page.keyboard.press('Enter')
-                    submit_ok = True
-                except:
-                    pass
-
-            # Tenta 3: submit via JavaScript
-            if not submit_ok:
-                try:
-                    page.evaluate('document.querySelector("form")?.submit()')
-                    submit_ok = True
-                except:
-                    pass
-
-            page.wait_for_load_state('networkidle', timeout=15000)
+            # Passo 4: aguardar navegação
+            page.wait_for_load_state('networkidle', timeout=20000)
             logger.info(f'URL pós-login: {page.url}')
 
-            # Verifica sucesso
+            # Passo 5: verificar se logou
             if 'login' not in page.url.lower():
                 context.storage_state(path=STORAGE_FILE)
                 browser.close()
                 logger.info('Login OK')
-                return jsonify({'success': True})
+                return jsonify({'success': True, 'url': page.url})
+
+            # Se ainda está no login, tenta POST direto
+            logger.info('Tentando POST direto para neo_security_manager')
+            
+            # Captura cookies atuais
+            cookies = context.cookies()
+            logger.info(f'Cookies: {len(cookies)}')
+            
+            # Navega direto via POST
+            resp2 = page.goto(f'{BASE_URL}/gestaofacil/login/neo_security_manager', wait_until='networkidle')
+            logger.info(f'URL após POST direto: {page.url}')
+            
+            # Tenta fazer o POST com form data
+            resposta = page.evaluate('''async ({ user, pass }) => {
+                const resp = await fetch('/gestaofacil/login/neo_security_manager', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Origin': 'https://logus.gfsis.com.br',
+                        'Referer': 'https://logus.gfsis.com.br/gestaofacil/login/Index'
+                    },
+                    body: new URLSearchParams({ username: user, password: pass })
+                });
+                return { status: resp.status, url: resp.url };
+            }''', {'user': USERNAME, 'pass': SENHA})
+            
+            logger.info(f'Resposta POST direto: {resposta}')
+            
+            # Vai pra home
+            page.goto(f'{BASE_URL}/gestaofacil/', wait_until='networkidle')
+            logger.info(f'URL final: {page.url}')
+
+            if 'login' not in page.url.lower():
+                context.storage_state(path=STORAGE_FILE)
+                browser.close()
+                logger.info('Login OK via POST direto')
+                return jsonify({'success': True, 'url': page.url, 'metodo': 'post_direto'})
 
             browser.close()
             return jsonify({
-                'error': 'Login falhou',
-                'url_final': page.url,
-                'form_info': form_info
+                'error': 'Login falhou em todas tentativas',
+                'url_final': page.url
             }), 502
 
     except Exception as e:
