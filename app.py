@@ -1,99 +1,94 @@
-import os, logging, sys
-import requests
+import os, logging
 from flask import Flask, request, jsonify
+import requests
 from playwright.sync_api import sync_playwright
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler(sys.stdout)])
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-COOKIE_JAR = None
-AUTHENTICATED = False
-BASE_URL = "https://logus.gfsis.com.br"
-USERNAME = os.environ.get("USERNAME", "teste2")
-SENHA = os.environ.get("SENHA", "654321")
-PORT = int(os.environ.get("PORT", 10000))
 
 app = Flask(__name__)
 
-def realizar_login_playwright():
-    global AUTHENTICATED
+USERNAME = os.environ.get('USERNAME', 'teste2')
+SENHA = os.environ.get('SENHA', '654321')
+PORT = int(os.environ.get('PORT', 10000))
+BASE_URL = 'https://logus.gfsis.com.br'
+
+session_data = {'jsessionid': None}
+
+def login():
     try:
-        logger.info("Iniciando Playwright para login...")
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                viewport={'width': 1280, 'height': 720},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            )
+            browser = p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+            context = browser.new_context()
             page = context.new_page()
 
-            page.goto(f"{BASE_URL}/gestaofacil/login/Index", timeout=30000)
-            page.fill("input[name='username']", USERNAME, timeout=30000)
-            page.fill("input[name='password']", SENHA, timeout=30000)
-            page.click("input#btn-login", timeout=30000)
+            page.goto(f'{BASE_URL}/gestaofacil/login/Index', wait_until='networkidle')
+            page.fill('input[name="username"]', USERNAME)
+            page.fill('input[name="password"]', SENHA)
+            page.click('input#btn-login')
 
-            # Aguarda redirecionamento (saiu da pagina de login)
-            page.wait_for_url(lambda url: "/login/Index" not in url, timeout=30000)
-            logger.info(f"URL pos-login: {page.url}")
+            try:
+                page.wait_for_url(lambda x: 'login' not in x.lower(), timeout=15000)
+            except:
+                erro = page.query_selector('.alert-danger, .msg_erro')
+                if erro:
+                    logger.error(f'Erro no login: {erro.inner_text()}')
+                    browser.close()
+                    return False
+                if 'login' in page.url.lower():
+                    logger.error('Ainda na pagina de login')
+                    browser.close()
+                    return False
 
-            cookies = context.cookies()
-            browser.close()
+            page.wait_for_load_state('networkidle')
 
-            for c in cookies:
+            for c in context.cookies():
                 if c['name'] == 'JSESSIONID':
-                    logger.info(f"JSESSIONID obtido: {c['value'][:20]}...")
-                    AUTHENTICATED = True
-                    return c['value']
+                    session_data['jsessionid'] = c['value']
+                    logger.info(f'JSESSIONID: {c["value"][:30]}...')
+                    break
 
-            logger.error("JSESSIONID nao encontrado")
-            AUTHENTICATED = False
-            return None
-
+            browser.close()
+            logger.info('Login OK')
+            return True
     except Exception as e:
-        logger.error(f"Erro Playwright: {e}")
-        AUTHENTICATED = False
-        return None
-
-def atualizar_sessao():
-    global COOKIE_JAR
-    valor = realizar_login_playwright()
-    if valor:
-        COOKIE_JAR = requests.cookies.create_cookie(
-            domain="logus.gfsis.com.br", name="JSESSIONID",
-            value=valor, path="/"
-        )
-        return True
-    COOKIE_JAR = None
-    return False
+        logger.exception(f'Erro: {e}')
+        return False
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "ok", "autenticado": AUTHENTICATED})
+    return jsonify({'status': 'ok', 'autenticado': session_data['jsessionid'] is not None})
 
 @app.route('/refresh-login', methods=['POST'])
 def refresh_login():
-    if atualizar_sessao():
-        return jsonify({"success": True})
-    return jsonify({"success": False, "error": "Falha no login"}), 500
+    return jsonify({'success': login()})
 
 @app.route('/fetch', methods=['POST'])
 def fetch():
     dados = request.get_json()
     if not dados or 'url' not in dados:
-        return jsonify({"error": "url obrigatoria"}), 400
+        return jsonify({'error': 'url obrigatoria'}), 400
+
+    if not session_data['jsessionid']:
+        if not login():
+            return jsonify({'error': 'sem sessao'}), 500
 
     s = requests.Session()
-    if COOKIE_JAR:
-        s.cookies.set_cookie(COOKIE_JAR)
+    s.cookies.set('JSESSIONID', session_data['jsessionid'], domain='logus.gfsis.com.br', path='/gestaofacil')
 
     try:
         r = s.get(BASE_URL + dados['url'], timeout=30)
-        return jsonify({"status": r.status_code, "body": r.text, "url": r.url})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        # Se caiu na pagina de login, tenta renovar
+        if 'login' in r.url.lower():
+            logger.warning('Redirecionado ao login. Renovando sessao...')
+            if login():
+                s.cookies.set('JSESSIONID', session_data['jsessionid'], domain='logus.gfsis.com.br', path='/gestaofacil')
+                r = s.get(BASE_URL + dados['url'], timeout=30)
 
-if __name__ == "__main__":
-    logger.info("Iniciando...")
-    if not atualizar_sessao():
-        logger.warning("Login inicial falhou. Use /refresh-login depois.")
-    app.run(host="0.0.0.0", port=PORT)
+        return jsonify({'status': r.status_code, 'body': r.text, 'url': r.url})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    login()
+    app.run(host='0.0.0.0', port=PORT)
