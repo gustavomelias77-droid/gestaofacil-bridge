@@ -10,11 +10,9 @@ WORKDIR /app
 
 COPY requirements.txt app.py ./
 
-RUN pip install --no-cache-dir -r requirements.txt
-
-RUN playwright install chromium
-
-RUN playwright install-deps
+RUN pip install --no-cache-dir -r requirements.txt && \
+    playwright install chromium && \
+    playwright install-deps
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
