@@ -10,9 +10,9 @@ WORKDIR /app
 
 COPY requirements.txt app.py ./
 
-RUN pip install --no-cache-dir -r requirements.txt && \
-    playwright install chromium && \
-    playwright install-deps
+RUN pip install --no-cache-dir playwright==1.52.0 flask requests gunicorn
+
+RUN playwright install --with-deps chromium
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
