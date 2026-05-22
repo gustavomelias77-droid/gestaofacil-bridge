@@ -1,49 +1,57 @@
-import os
-import requests
+import os, logging
 from flask import Flask, request, jsonify
+import requests
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-jsessionid = None
+BASE_URL = "https://logus.gfsis.com.br"
+store = {}
 
 @app.route('/set-session', methods=['POST'])
 def set_session():
-    global jsessionid
     data = request.get_json()
     if not data or 'jsessionid' not in data:
-        return jsonify({'error': 'Campo jsessionid é obrigatório'}), 400
-    jsessionid = data['jsessionid']
-    app.logger.info('JSESSIONID atualizado com sucesso')
-    return jsonify({'message': 'JSESSIONID salvo com sucesso'}), 200
+        return jsonify({"success": False, "error": "jsessionid obrigatorio"}), 400
+    store['jsessionid'] = data['jsessionid']
+    logger.info("JSESSIONID armazenado")
+    return jsonify({"success": True, "message": "Sessao armazenada"})
 
-@app.route('/health', methods=['GET'])
+@app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'autenticado': jsessionid is not None}), 200
+    return jsonify({"status": "ok", "autenticado": 'jsessionid' in store})
 
 @app.route('/fetch', methods=['POST'])
 def fetch():
-    global jsessionid
     data = request.get_json()
     if not data or 'url' not in data:
-        return jsonify({'error': 'Campo url é obrigatório'}), 400
+        return jsonify({"error": "url obrigatoria"}), 400
 
-    url = data['url']
-    if not url.startswith('/'):
-        url = '/' + url
-
-    target_url = f'https://logus.gfsis.com.br{url}'
     cookies = {}
-    if jsessionid:
-        cookies['JSESSIONID'] = jsessionid
+    if 'jsessionid' in store:
+        cookies['JSESSIONID'] = store['jsessionid']
+    else:
+        return jsonify({"status": 0, "body": "sem sessao"})
 
     try:
-        response = requests.get(target_url, cookies=cookies, timeout=30)
-        return jsonify({
-            'status': response.status_code,
-            'body': response.text,
-            'url': response.url
-        }), 200
-    except requests.exceptions.RequestException as e:
-        return jsonify({'error': 'Erro na requisição', 'details': str(e)}), 500
+        r = requests.get(BASE_URL + data['url'], cookies=cookies, timeout=30)
+        return jsonify({"status": r.status_code, "body": r.text, "url": r.url})
+    except Exception as e:
+        return jsonify({"status": 0, "body": str(e)})
+
+@app.route('/check-session', methods=['POST'])
+def check_session():
+    if 'jsessionid' not in store:
+        return jsonify({"valida": False, "status_code": 0, "motivo": "nenhuma sessao armazenada"})
+
+    try:
+        r = requests.get(BASE_URL + "/gestaofacil/", cookies={'JSESSIONID': store['jsessionid']}, timeout=30)
+        if 'btn-login' in r.text or 'ENTRAR' in r.text:
+            return jsonify({"valida": False, "status_code": r.status_code, "motivo": "sessao expirada, precisa renovar"})
+        return jsonify({"valida": True, "status_code": r.status_code, "motivo": "sessao valida"})
+    except Exception as e:
+        return jsonify({"valida": False, "status_code": 0, "motivo": str(e)})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
